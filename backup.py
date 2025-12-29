@@ -242,6 +242,96 @@ class MySQLDumpTask(BackupTask):
         return env
 
 
+class DirectoryBackupTask(BackupTask):
+    def __init__(self, source_config, destinations, encryptions, compressor, encryptor, uploader):
+        self.source_config = source_config
+        self.destinations = destinations or {}
+        self.encryptions = encryptions or {}
+        self.compressor = compressor
+        self.encryptor = encryptor
+        self.uploader = uploader
+
+    def run(self):
+        for name in self.source_config:
+            cfg = self.source_config[name]
+            source_dir = Path(cfg.get("path", ""))
+            if not source_dir.is_dir():
+                log(f"ERROR, invalid source path for {name}: {source_dir}")
+                continue
+
+            temp_dir = Path(cfg.get("temp", ""))
+            if not str(temp_dir):
+                log(f"ERROR, missing temp path for source {name}")
+                continue
+            temp_dir.mkdir(parents=True, exist_ok=True)
+
+            compress_method = cfg.get("compress")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+            archive_name = f"{source_dir.name}_{timestamp}.tar"
+            archive_path = temp_dir / archive_name
+
+            cmd = self._tar_cmd(cfg, source_dir, archive_path, compress_method)
+            if not cmd:
+                continue
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if result.returncode != 0:
+                log(f"ERROR creating archive {archive_name}: {result.stderr.decode(errors='replace')}")
+                continue
+
+            if compress_method == "gzip":
+                archive_path = archive_path.with_suffix(".tar.gz")
+            elif compress_method == "bzip2":
+                archive_path = archive_path.with_suffix(".tar.bz2")
+
+            log(f"ARCHIVED {source_dir} -> {archive_path}")
+
+            encryption_key = cfg.get("encryption")
+            if encryption_key:
+                encryption_cfg = self.encryptions.get(encryption_key)
+                if not encryption_cfg:
+                    log(f"ERROR, encryption not found: {encryption_key}")
+                    continue
+                encrypted_file = self.encryptor.encrypt(archive_path, encryption_cfg)
+                if not encrypted_file:
+                    continue
+                if archive_path.exists():
+                    archive_path.unlink()
+                archive_path = encrypted_file
+
+            destination_key = cfg.get("destination")
+            if destination_key:
+                destination_cfg = self.destinations.get(destination_key)
+                if not destination_cfg:
+                    log(f"ERROR, destination not found: {destination_key}")
+                    continue
+                uploaded = self.uploader.upload(archive_path, destination_cfg)
+                if uploaded and cfg.get("cleanup", True):
+                    archive_path.unlink()
+            else:
+                log(f"INFO, no destination configured for {archive_path.name}")
+
+    def _tar_cmd(self, cfg, source_dir, archive_path, compress_method):
+        args = ["tar"]
+        if compress_method == "gzip":
+            args.append("-czf")
+        elif compress_method == "bzip2":
+            args.append("-cjf")
+        else:
+            args.append("-cf")
+
+        args.append(str(archive_path))
+
+        if cfg.get("incremental"):
+            snapshot = cfg.get("incremental_snapshot")
+            if not snapshot:
+                log("ERROR, incremental requires incremental_snapshot")
+                return None
+            args.extend(["--listed-incremental", str(snapshot)])
+
+        args.extend(["-C", str(source_dir.parent), str(source_dir.name)])
+        return args
+
+
 class BackupRunner:
     def __init__(self, config):
         self.config = config
@@ -259,6 +349,17 @@ class BackupRunner:
             if source_type == "mysqldump":
                 tasks.append(
                     MySQLDumpTask(
+                        sources[source_type],
+                        destinations,
+                        encryptions,
+                        self.compressor,
+                        self.encryptor,
+                        self.uploader,
+                    )
+                )
+            elif source_type == "directories":
+                tasks.append(
+                    DirectoryBackupTask(
                         sources[source_type],
                         destinations,
                         encryptions,

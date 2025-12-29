@@ -1,6 +1,7 @@
 # backup.py
 
 Script de backups definido por YAML. Actualmente soporta `mysqldump`, compresion, cifrado GPG y subida a S3.
+Incluye backup de directorios con `tar`.
 
 ## Requisitos
 
@@ -9,6 +10,7 @@ Script de backups definido por YAML. Actualmente soporta `mysqldump`, compresion
 - boto3
 - Binarios disponibles en PATH segun lo que uses:
   - `mysqldump` y `mysql` (para MySQL)
+  - `tar` (para directorios)
   - `gzip` o `bzip2` (si usas compresion)
   - `gpg` (si usas cifrado)
 
@@ -27,6 +29,9 @@ Estructura general:
 ```yaml
 sources:
   mysqldump:
+    nombre_de_fuente:
+      # opciones del backup (ver abajo)
+  directories:
     nombre_de_fuente:
       # opciones del backup (ver abajo)
 
@@ -131,6 +136,49 @@ Opciones posibles para cada entrada de `encryptions.*`:
 
 - `method` (string, requerido): `gpg`.
 - `recipient` (string, requerido): receptor GPG.
+
+### Sources: directories
+
+Opciones posibles para cada entrada de `sources.directories.*`:
+
+- `path` (string, requerido): directorio a respaldar.
+- `temp` (string, requerido): directorio temporal donde se guardan los tar.
+- `compress` (string, opcional): `gzip`, `bzip2` o vacío.
+- `encryption` (string, opcional): referencia a una entrada en `encryptions`.
+- `destination` (string, opcional): referencia a una entrada en `destinations`.
+- `cleanup` (bool, opcional): si es `true` (por defecto), borra el archivo local tras subirlo.
+- `incremental` (bool, opcional): si es `true`, usa incremental de `tar`.
+- `incremental_snapshot` (string, opcional): ruta al snapshot de incremental (`tar --listed-incremental`).
+
+Notas:
+- Si `incremental` es `true` necesitas `incremental_snapshot` para mantener el estado entre ejecuciones.
+- El incremental genera un tar por ejecucion; el primer backup debe ser full (snapshot vacio o inexistente).
+
+Ejemplo de directorio:
+
+```yaml
+sources:
+  directories:
+    home:
+      path: /home/pablo/data
+      temp: /tmp/backups
+      compress: gzip
+      destination: s3-main
+```
+
+Ejemplo incremental:
+
+```yaml
+sources:
+  directories:
+    home:
+      path: /home/pablo/data
+      temp: /tmp/backups
+      compress: bzip2
+      destination: s3-main
+      incremental: true
+      incremental_snapshot: /var/lib/backup/home.snar
+```
 
 ## Salida y comportamiento
 

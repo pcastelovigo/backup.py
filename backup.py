@@ -1,4 +1,4 @@
-VERSION = 1
+VERSION = 2
 import os
 import subprocess
 from datetime import datetime
@@ -8,13 +8,17 @@ import argparse
 import yaml
 import boto3
 
-def load_config(file_path):
+
+class ConfigError(Exception):
+    pass
+
+
+def load_config(file_path: Path):
     _, ext = os.path.splitext(file_path)
-    with open(file_path, 'rb') as f:
-        if ext in ['.yaml', '.yml']:
-            return yaml.safe_load(f)
-        else:
-            raise ValueError(f"Unsupported file extension: {ext}")
+    if ext not in [".yaml", ".yml"]:
+        raise ConfigError(f"Unsupported file extension: {ext}")
+    with open(file_path, "rb") as f:
+        return yaml.safe_load(f)
 
 
 def get_config_path():
@@ -23,133 +27,258 @@ def get_config_path():
         "--config",
         type=Path,
         help="Path to YAML configuration file",
-        default=Path(__file__).resolve().parent / "config.yaml"
+        default=Path(__file__).resolve().parent / "config.yaml",
     )
     args = parser.parse_args()
     return args.config
 
-########################### COMPRESS
 
-def compress_file(file_path: Path, method: str):
-    try:
-        if method == 'gzip':
-            subprocess.run(['gzip', str(file_path)], check=True)
-            new_path = file_path.with_suffix(file_path.suffix + '.gz')
-            print(f"COMPRESSED {file_path.name} → {new_path.name}")
-            return new_path
+def log(message):
+    print(message)
 
-        elif method == 'bzip2':
-            subprocess.run(['bzip2', str(file_path)], check=True)
-            new_path = file_path.with_suffix(file_path.suffix + '.bz2')
-            print(f"COMPRESSED {file_path.name} → {new_path.name}")
-            return new_path
 
-        else:
-            print(f"ERROR, not supported: {method}")
+class Compressor:
+    def compress(self, file_path: Path, method: str):
+        try:
+            if method == "gzip":
+                subprocess.run(["gzip", str(file_path)], check=True)
+                new_path = file_path.with_suffix(file_path.suffix + ".gz")
+                log(f"COMPRESSED {file_path.name} -> {new_path.name}")
+                return new_path
+
+            if method == "bzip2":
+                subprocess.run(["bzip2", str(file_path)], check=True)
+                new_path = file_path.with_suffix(file_path.suffix + ".bz2")
+                log(f"COMPRESSED {file_path.name} -> {new_path.name}")
+                return new_path
+
+            log(f"ERROR, not supported: {method}")
+            return None
+
+        except subprocess.CalledProcessError as exc:
+            log(f"ERROR, compressing file {file_path.name}: {exc}")
+            return None
+
+
+class Encryptor:
+    def encrypt(self, file_path: Path, encryption):
+        try:
+            if encryption.get("method") == "gpg":
+                encrypted_path = file_path.with_suffix(file_path.suffix + ".gpg")
+                subprocess.run(
+                    [
+                        "gpg",
+                        "--batch",
+                        "--yes",
+                        "--output",
+                        str(encrypted_path),
+                        "--encrypt",
+                        "--recipient",
+                        encryption["recipient"],
+                        str(file_path),
+                    ],
+                    check=True,
+                )
+                log(f"ENCRYPTED {file_path.name} -> {encrypted_path.name}")
+                return encrypted_path
+
+            log(f"ERROR, not supported: {encryption.get('method')}")
+            return None
+
+        except subprocess.CalledProcessError as exc:
+            log(f"ERROR encrypting file {file_path.name}: {exc}")
+            return None
+
+
+class Uploader:
+    def upload(self, file_path: Path, destination):
+        try:
+            if destination.get("method") == "s3":
+                client_kwargs = {}
+                if destination.get("AWS_ACCESS_KEY_ID"):
+                    client_kwargs["aws_access_key_id"] = destination["AWS_ACCESS_KEY_ID"]
+                if destination.get("AWS_SECRET_ACCESS_KEY"):
+                    client_kwargs["aws_secret_access_key"] = destination["AWS_SECRET_ACCESS_KEY"]
+                if destination.get("AWS_SESSION_TOKEN"):
+                    client_kwargs["aws_session_token"] = destination["AWS_SESSION_TOKEN"]
+
+                s3 = boto3.client("s3", **client_kwargs)
+                bucket = destination["S3_BUCKET"]
+                prefix = destination.get("prefix", "").strip("/")
+                key = f"{prefix}/{file_path.name}" if prefix else file_path.name
+
+                s3.upload_file(str(file_path), bucket, key)
+                log(f"UPLOADED {file_path.name} -> s3://{bucket}/{key}")
+                return True
+
+            log(f"ERROR, Not supported: {destination.get('method')}")
             return False
 
-    except subprocess.CalledProcessError as e:
-        print(f"ERROR, compressing file {file_path.name}: {e}")
-        return False
-
-########################### ENCRYPT
-
-def encrypt_file(file_path: Path, encryption):
-    try:
-        if encryption['method'] == "gpg":
-            encrypted_path = file_path.with_suffix(file_path.suffix + '.gpg')
-            subprocess.run([
-                'gpg',
-                '--batch',
-                '--yes',
-                '--output', str(encrypted_path),
-                '--encrypt',
-                '--recipient', encryption['recipient'],
-                str(file_path)
-            ], check=True)
-
-            print(f"ENCRYPTED {file_path.name} → {encrypted_path.name}")
-            return encrypted_path
-        else:
-            print(f"ERROR, not supported: {encryption['method']}")
-
-
-    except subprocess.CalledProcessError as e:
-        print(f"ERROR encrypting file {file_path.name}: {e}")
-        return False
-
-
-############################ UPLOAD
-
-def upload(file_path:Path, destination):
-    try:
-        if destination['method'] == "s3":
-            s3 = boto3.client(
-            's3',
-            aws_access_key_id=destination['AWS_ACCESS_KEY_ID'],
-            aws_secret_access_key=destination['AWS_SECRET_ACCESS_KEY'],
-            )
-            s3.upload_file(str(file_path), destination['S3_BUCKET'], file_path.name)
-            print(f"UPLOADED {file_path.name} → s3://{destination['S3_BUCKET']}/{file_path.name}")
-            return True
-        
-        else:
-            print(f"ERROR, Not supported: {destination['method']}")
+        except Exception as exc:
+            log(f"ERROR uploading: {exc}")
             return False
-        
-    except Exception as e:
-        print(f"ERROR uploading to S3: {e}")
-        return False
 
-########################### MYSQLDUMP
 
-def mysqldump(source, destinations, encryptions):
-    for b in source:
-        temp_dir = Path(source[b]['temp'])
-        temp_dir.mkdir(parents=True, exist_ok=True)
+class BackupTask:
+    def run(self):
+        raise NotImplementedError
 
-        compress = source[b].get('compress')
-        databases = source[b].get('databases')
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M')
 
-        for db in databases:
-            dump_file = temp_dir / f"{db}_{timestamp}.sql"
-            cmd = ['mysqldump', db]
+class MySQLDumpTask(BackupTask):
+    def __init__(self, source_config, destinations, encryptions, compressor, encryptor, uploader):
+        self.source_config = source_config
+        self.destinations = destinations or {}
+        self.encryptions = encryptions or {}
+        self.compressor = compressor
+        self.encryptor = encryptor
+        self.uploader = uploader
+        self.system_databases = ["mysql", "information_schema", "performance_schema", "sys"]
 
-            with open(dump_file, 'wb') as f:
-                result = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE)
-
-            if result.returncode != 0:
-                print(f"Error dumping {db}: {result.stderr.decode()}")
+    def run(self):
+        for name in self.source_config:
+            cfg = self.source_config[name]
+            temp_dir = Path(cfg.get("temp", ""))
+            if not str(temp_dir):
+                log(f"ERROR, missing temp path for source {name}")
                 continue
-            else:
-                print(f"DUMPED {db} → {dump_file}")
+            temp_dir.mkdir(parents=True, exist_ok=True)
 
-            if compress:
-                compressed_file = compress_file(dump_file, compress)
-                if compressed_file:
+            all_except_system = cfg.get("all_databases_except_system", False)
+            databases = cfg.get("databases") or []
+            if all_except_system:
+                exclude = cfg.get("exclude_databases") or self.system_databases
+                databases = self._list_databases(cfg, exclude)
+                if not databases:
+                    log(f"ERROR, no databases found for source {name}")
+                    continue
+            elif not databases:
+                log(f"ERROR, no databases listed for source {name}")
+                continue
+
+            compress_method = cfg.get("compress")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+
+            for db in databases:
+                dump_file = temp_dir / f"{db}_{timestamp}.sql"
+                cmd = self._mysqldump_cmd(cfg, db)
+                env = self._mysql_env(cfg)
+
+                with open(dump_file, "wb") as f:
+                    result = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, env=env)
+
+                if result.returncode != 0:
+                    log(f"Error dumping {db}: {result.stderr.decode(errors='replace')}")
+                    continue
+
+                log(f"DUMPED {db} -> {dump_file}")
+
+                if compress_method:
+                    compressed_file = self.compressor.compress(dump_file, compress_method)
+                    if not compressed_file:
+                        continue
                     dump_file = compressed_file
 
-            if encryptions:
-                encrypted_file = encrypt_file(dump_file, encryptions[source[b]['encryption']])
-                if encrypted_file:
-                    dump_file.unlink()
+                encryption_key = cfg.get("encryption")
+                if encryption_key:
+                    encryption_cfg = self.encryptions.get(encryption_key)
+                    if not encryption_cfg:
+                        log(f"ERROR, encryption not found: {encryption_key}")
+                        continue
+                    encrypted_file = self.encryptor.encrypt(dump_file, encryption_cfg)
+                    if not encrypted_file:
+                        continue
+                    if dump_file.exists():
+                        dump_file.unlink()
                     dump_file = encrypted_file
-            
-            if destinations:
-                uploaded = upload(dump_file, destinations[source[b]['destination']])
-                if uploaded:
-                    dump_file.unlink()
+
+                destination_key = cfg.get("destination")
+                if destination_key:
+                    destination_cfg = self.destinations.get(destination_key)
+                    if not destination_cfg:
+                        log(f"ERROR, destination not found: {destination_key}")
+                        continue
+                    uploaded = self.uploader.upload(dump_file, destination_cfg)
+                    if uploaded and cfg.get("cleanup", True):
+                        dump_file.unlink()
+                else:
+                    log(f"INFO, no destination configured for {dump_file.name}")
+
+    def _mysql_args(self, cfg):
+        args = []
+        if cfg.get("host"):
+            args.extend(["-h", str(cfg["host"])])
+        if cfg.get("port"):
+            args.extend(["-P", str(cfg["port"])])
+        if cfg.get("user"):
+            args.extend(["-u", str(cfg["user"])])
+        if cfg.get("extra_args"):
+            args.extend(cfg["extra_args"])
+        return args
+
+    def _mysqldump_cmd(self, cfg, db):
+        args = ["mysqldump"] + self._mysql_args(cfg)
+        return args + [db]
+
+    def _list_databases(self, cfg, exclude):
+        cmd = ["mysql"] + self._mysql_args(cfg) + ["-N", "-e", "SHOW DATABASES"]
+        env = self._mysql_env(cfg)
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        if result.returncode != 0:
+            log(f"ERROR listing databases: {result.stderr.decode(errors='replace')}")
+            return []
+        exclude_set = set(exclude)
+        databases = []
+        for line in result.stdout.decode(errors="replace").splitlines():
+            name = line.strip()
+            if not name or name in exclude_set:
+                continue
+            databases.append(name)
+        return databases
+
+    def _mysql_env(self, cfg):
+        env = os.environ.copy()
+        if cfg.get("password"):
+            env["MYSQL_PWD"] = str(cfg["password"])
+        return env
 
 
+class BackupRunner:
+    def __init__(self, config):
+        self.config = config
+        self.compressor = Compressor()
+        self.encryptor = Encryptor()
+        self.uploader = Uploader()
 
-BACKUP_SOURCES = {
-    'mysqldump': mysqldump,
-}
+    def build_tasks(self):
+        tasks = []
+        sources = self.config.get("sources") or {}
+        destinations = self.config.get("destinations")
+        encryptions = self.config.get("encryptions")
 
-config_path = get_config_path()
-config = load_config(config_path)
-#print(config)
+        for source_type in sources:
+            if source_type == "mysqldump":
+                tasks.append(
+                    MySQLDumpTask(
+                        sources[source_type],
+                        destinations,
+                        encryptions,
+                        self.compressor,
+                        self.encryptor,
+                        self.uploader,
+                    )
+                )
+            else:
+                log(f"ERROR, source not supported yet: {source_type}")
+        return tasks
 
-for source in config['sources']:
-    BACKUP_SOURCES[source](config['sources'][source], config.get('destinations'), config.get('encryptions'))
+    def run(self):
+        tasks = self.build_tasks()
+        for task in tasks:
+            task.run()
+
+
+if __name__ == "__main__":
+    config_path = get_config_path()
+    config = load_config(config_path)
+    runner = BackupRunner(config)
+    runner.run()

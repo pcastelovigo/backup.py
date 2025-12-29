@@ -267,7 +267,7 @@ class DirectoryBackupTask(BackupTask):
 
             compress_method = cfg.get("compress")
             timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-            archive_name = f"{source_dir.name}_{timestamp}.tar"
+            archive_name = self._archive_name(source_dir.name, timestamp, compress_method)
             archive_path = temp_dir / archive_name
 
             cmd = self._tar_cmd(cfg, source_dir, archive_path, compress_method)
@@ -277,11 +277,6 @@ class DirectoryBackupTask(BackupTask):
             if result.returncode != 0:
                 log(f"ERROR creating archive {archive_name}: {result.stderr.decode(errors='replace')}")
                 continue
-
-            if compress_method == "gzip":
-                archive_path = archive_path.with_suffix(".tar.gz")
-            elif compress_method == "bzip2":
-                archive_path = archive_path.with_suffix(".tar.bz2")
 
             log(f"ARCHIVED {source_dir} -> {archive_path}")
 
@@ -332,6 +327,13 @@ class DirectoryBackupTask(BackupTask):
 
         args.extend(["-C", str(source_dir.parent), str(source_dir.name)])
         return args
+
+    def _archive_name(self, base_name, timestamp, compress_method):
+        if compress_method == "gzip":
+            return f"{base_name}_{timestamp}.tar.gz"
+        if compress_method == "bzip2":
+            return f"{base_name}_{timestamp}.tar.bz2"
+        return f"{base_name}_{timestamp}.tar"
 
 
 class BackupRunner:

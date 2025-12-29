@@ -326,7 +326,9 @@ class DirectoryBackupTask(BackupTask):
             if not snapshot:
                 log("ERROR, incremental requires incremental_snapshot")
                 return None
-            args.extend(["--listed-incremental", str(snapshot)])
+            snapshot_path = Path(snapshot)
+            snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+            args.extend(["--listed-incremental", str(snapshot_path)])
 
         args.extend(["-C", str(source_dir.parent), str(source_dir.name)])
         return args

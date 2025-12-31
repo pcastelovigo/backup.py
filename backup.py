@@ -242,6 +242,131 @@ class MySQLDumpTask(BackupTask):
         return env
 
 
+class PostgresDumpTask(BackupTask):
+    def __init__(self, source_config, destinations, encryptions, compressor, encryptor, uploader):
+        self.source_config = source_config
+        self.destinations = destinations or {}
+        self.encryptions = encryptions or {}
+        self.compressor = compressor
+        self.encryptor = encryptor
+        self.uploader = uploader
+        self.system_databases = ["postgres", "template0", "template1"]
+
+    def run(self):
+        for name in self.source_config:
+            cfg = self.source_config[name]
+            temp_dir = Path(cfg.get("temp", ""))
+            if not str(temp_dir):
+                log(f"ERROR, missing temp path for source {name}")
+                continue
+            temp_dir.mkdir(parents=True, exist_ok=True)
+
+            all_except_system = cfg.get("all_databases_except_system", False)
+            databases = cfg.get("databases") or []
+            if all_except_system:
+                exclude = cfg.get("exclude_databases") or self.system_databases
+                databases = self._list_databases(cfg, exclude)
+                if not databases:
+                    log(f"ERROR, no databases found for source {name}")
+                    continue
+            elif not databases:
+                log(f"ERROR, no databases listed for source {name}")
+                continue
+
+            compress_method = cfg.get("compress")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+
+            for db in databases:
+                dump_file = temp_dir / f"{db}_{timestamp}.sql"
+                cmd = ["pg_dump"] + self._pg_args(cfg, db)
+                env = self._pg_env(cfg)
+
+                with open(dump_file, "wb") as f:
+                    result = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, env=env)
+
+                if result.returncode != 0:
+                    log(f"Error dumping {db}: {result.stderr.decode(errors='replace')}")
+                    continue
+
+                log(f"DUMPED {db} -> {dump_file}")
+
+                if compress_method:
+                    compressed_file = self.compressor.compress(dump_file, compress_method)
+                    if not compressed_file:
+                        continue
+                    dump_file = compressed_file
+
+                encryption_key = cfg.get("encryption")
+                if encryption_key:
+                    encryption_cfg = self.encryptions.get(encryption_key)
+                    if not encryption_cfg:
+                        log(f"ERROR, encryption not found: {encryption_key}")
+                        continue
+                    encrypted_file = self.encryptor.encrypt(dump_file, encryption_cfg)
+                    if not encrypted_file:
+                        continue
+                    if dump_file.exists():
+                        dump_file.unlink()
+                    dump_file = encrypted_file
+
+                destination_key = cfg.get("destination")
+                if destination_key:
+                    destination_cfg = self.destinations.get(destination_key)
+                    if not destination_cfg:
+                        log(f"ERROR, destination not found: {destination_key}")
+                        continue
+                    uploaded = self.uploader.upload(dump_file, destination_cfg)
+                    if uploaded and cfg.get("cleanup", True):
+                        dump_file.unlink()
+                else:
+                    log(f"INFO, no destination configured for {dump_file.name}")
+
+    def _pg_args(self, cfg, db):
+        args = []
+        if cfg.get("host"):
+            args.extend(["-h", str(cfg["host"])])
+        if cfg.get("port"):
+            args.extend(["-p", str(cfg["port"])])
+        if cfg.get("user"):
+            args.extend(["-U", str(cfg["user"])])
+        if cfg.get("extra_args"):
+            args.extend(cfg["extra_args"])
+        args.extend(["-d", str(db)])
+        return args
+
+    def _pg_env(self, cfg):
+        env = os.environ.copy()
+        if cfg.get("password"):
+            env["PGPASSWORD"] = str(cfg["password"])
+        return env
+
+    def _list_databases(self, cfg, exclude):
+        cmd = ["psql"] + self._psql_args(cfg) + ["-At", "-c", "SELECT datname FROM pg_database WHERE datistemplate = false;"]
+        env = self._pg_env(cfg)
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        if result.returncode != 0:
+            log(f"ERROR listing databases: {result.stderr.decode(errors='replace')}")
+            return []
+        exclude_set = set(exclude)
+        databases = []
+        for line in result.stdout.decode(errors="replace").splitlines():
+            name = line.strip()
+            if not name or name in exclude_set:
+                continue
+            databases.append(name)
+        return databases
+
+    def _psql_args(self, cfg):
+        args = []
+        if cfg.get("host"):
+            args.extend(["-h", str(cfg["host"])])
+        if cfg.get("port"):
+            args.extend(["-p", str(cfg["port"])])
+        if cfg.get("user"):
+            args.extend(["-U", str(cfg["user"])])
+        return args
+
+
 class DirectoryBackupTask(BackupTask):
     def __init__(self, source_config, destinations, encryptions, compressor, encryptor, uploader):
         self.source_config = source_config
@@ -353,6 +478,17 @@ class BackupRunner:
             if source_type == "mysqldump":
                 tasks.append(
                     MySQLDumpTask(
+                        sources[source_type],
+                        destinations,
+                        encryptions,
+                        self.compressor,
+                        self.encryptor,
+                        self.uploader,
+                    )
+                )
+            elif source_type == "pgdump":
+                tasks.append(
+                    PostgresDumpTask(
                         sources[source_type],
                         destinations,
                         encryptions,

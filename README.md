@@ -1,6 +1,6 @@
 # backup.py
 
-Script de backups definido por YAML. Actualmente soporta `mysqldump`, compresion, cifrado GPG y subida a S3.
+Script de backups definido por YAML. Actualmente soporta `mysqldump`, `pgdump`, compresion, cifrado GPG y subida a S3.
 Incluye backup de directorios con `tar`.
 
 ## Requisitos
@@ -10,6 +10,7 @@ Incluye backup de directorios con `tar`.
 - boto3
 - Binarios disponibles en PATH segun lo que uses:
   - `mysqldump` y `mysql` (para MySQL)
+  - `pg_dump` y `psql` (para Postgres)
   - `tar` (para directorios)
   - `gzip` o `bzip2` (si usas compresion)
   - `gpg` (si usas cifrado)
@@ -29,6 +30,9 @@ Estructura general:
 ```yaml
 sources:
   mysqldump:
+    nombre_de_fuente:
+      # opciones del backup (ver abajo)
+  pgdump:
     nombre_de_fuente:
       # opciones del backup (ver abajo)
   directories:
@@ -114,6 +118,67 @@ sources:
         - information_schema
         - performance_schema
         - sys
+      destination: s3-main
+```
+
+### Sources: pgdump
+
+Opciones posibles para cada entrada de `sources.pgdump.*`:
+
+- `temp` (string, requerido): directorio temporal donde se guardan los dumps.
+- `databases` (lista de strings, opcional): lista explicita de bases a dumpear.
+- `all_databases_except_system` (bool, opcional): si es `true`, lista todas las bases y excluye las de sistema.
+- `exclude_databases` (lista de strings, opcional): lista de bases a excluir cuando `all_databases_except_system` es `true`.
+  - Por defecto: `postgres`, `template0`, `template1`.
+- `compress` (string, opcional): `gzip` o `bzip2`.
+- `encryption` (string, opcional): referencia a una entrada en `encryptions`.
+- `destination` (string, opcional): referencia a una entrada en `destinations`.
+- `cleanup` (bool, opcional): si es `true` (por defecto), borra el archivo local tras subirlo.
+- `host` (string, opcional): host de Postgres.
+- `port` (int, opcional): puerto de Postgres.
+- `user` (string, opcional): usuario de Postgres.
+- `password` (string, opcional): password de Postgres (se pasa via `PGPASSWORD`).
+- `extra_args` (lista de strings, opcional): argumentos extra para `pg_dump`.
+
+Notas:
+- Si `all_databases_except_system` es `true`, se ignora `databases` y se hace un dump individual por cada base listada.
+- Si no se define `destination`, el archivo queda en `temp`.
+
+Ejemplo con lista explicita:
+
+```yaml
+sources:
+  pgdump:
+    prod:
+      temp: /tmp/backups
+      databases:
+        - app
+        - analytics
+      compress: gzip
+      encryption: gpg-main
+      destination: s3-main
+      cleanup: true
+      host: localhost
+      port: 5432
+      user: postgres
+      password: secret
+      extra_args:
+        - --format=plain
+        - --no-owner
+```
+
+Ejemplo con todas las bases menos las de sistema:
+
+```yaml
+sources:
+  pgdump:
+    prod:
+      temp: /tmp/backups
+      all_databases_except_system: true
+      exclude_databases:
+        - postgres
+        - template0
+        - template1
       destination: s3-main
 ```
 
